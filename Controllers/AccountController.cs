@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Identity.UI.Services;
 using UserRoles.Models;
 using UserRoles.ViewModels;
 
@@ -10,13 +11,21 @@ namespace UserRoles.Controllers
         private readonly SignInManager<Users> signInManager;
         private readonly UserManager<Users> userManager;
         private readonly RoleManager<IdentityRole> roleManager;
+        private readonly IEmailSender emailSender;
 
-        public AccountController(SignInManager<Users> signInManager, UserManager<Users> userManager, RoleManager<IdentityRole> roleManager)
+        public AccountController(
+            SignInManager<Users> signInManager,
+            UserManager<Users> userManager,
+            RoleManager<IdentityRole> roleManager,
+            IEmailSender emailSender)
         {
             this.signInManager = signInManager;
             this.userManager = userManager;
             this.roleManager = roleManager;
+            this.emailSender = emailSender;
         }
+
+        // ================= LOGIN =================
 
         [HttpGet]
         public IActionResult Login()
@@ -29,20 +38,33 @@ namespace UserRoles.Controllers
         public async Task<IActionResult> Login(LoginViewModel model)
         {
             if (!ModelState.IsValid)
+                return View(model);
+
+            var user = await userManager.FindByEmailAsync(model.Email);
+
+            if (user != null && !user.EmailConfirmed)
             {
+                ModelState.AddModelError("", "Please confirm your email first.");
                 return View(model);
             }
 
-            var result = await signInManager.PasswordSignInAsync(model.Email, model.Password, model.RememberMe, lockoutOnFailure: false);
+            var result = await signInManager.PasswordSignInAsync(
+                model.Email,
+                model.Password,
+                model.RememberMe,
+                lockoutOnFailure: false
+            );
 
             if (result.Succeeded)
             {
                 return RedirectToAction("Index", "Home");
             }
 
-            ModelState.AddModelError(string.Empty, "Invalid Login Attempt.");
+            ModelState.AddModelError("", "Invalid Login Attempt.");
             return View(model);
         }
+
+        // ================= REGISTER =================
 
         [HttpGet]
         public IActionResult Register()
@@ -55,117 +77,78 @@ namespace UserRoles.Controllers
         public async Task<IActionResult> Register(RegisterViewModel model)
         {
             if (!ModelState.IsValid)
-            {
                 return View(model);
-            }
 
             var user = new Users
             {
                 FullName = model.Name,
                 UserName = model.Email,
-                NormalizedUserName = model.Email.ToUpper(),
                 Email = model.Email,
-                NormalizedEmail = model.Email.ToUpper()
+                EmailConfirmed = false
             };
 
             var result = await userManager.CreateAsync(user, model.Password);
 
             if (result.Succeeded)
             {
-                var roleExist = await roleManager.RoleExistsAsync("User");
-
-                if (!roleExist)
+                // Create role if not exists
+                if (!await roleManager.RoleExistsAsync("User"))
                 {
-                    var role = new IdentityRole("User");
-                    await roleManager.CreateAsync(role);
+                    await roleManager.CreateAsync(new IdentityRole("User"));
                 }
 
                 await userManager.AddToRoleAsync(user, "User");
 
-                await signInManager.SignInAsync(user, isPersistent: false);
-                return RedirectToAction("Login", "Account");
+                // ================= EMAIL CONFIRMATION =================
+
+                var token = await userManager.GenerateEmailConfirmationTokenAsync(user);
+
+                var confirmationLink = Url.Action(
+                    "ConfirmEmail",
+                    "Account",
+                    new { userId = user.Id, token = token },
+                    Request.Scheme
+                );
+
+                await emailSender.SendEmailAsync(
+                    user.Email,
+                    "Confirm your email",
+                    $"Please confirm your account by clicking here: <a href='{confirmationLink}'>Confirm Email</a>"
+                );
+
+                return RedirectToAction("RegistrationSuccess");
             }
 
             foreach (var error in result.Errors)
             {
-                ModelState.AddModelError(string.Empty, error.Description);
+                ModelState.AddModelError("", error.Description);
             }
 
             return View(model);
         }
 
+        // ================= EMAIL CONFIRMATION =================
+
         [HttpGet]
-        public IActionResult VerifyEmail()
+        public async Task<IActionResult> ConfirmEmail(string userId, string token)
         {
-            return View();
-        }
+            if (userId == null || token == null)
+                return RedirectToAction("Index", "Home");
 
-        [HttpPost]
-        [ValidateAntiForgeryToken]
-        public async Task<IActionResult> VerifyEmail(VerifyEmailViewModel model)
-        {
-            if (!ModelState.IsValid)
-            {
-                return View(model);
-            }
-
-            var user = await userManager.FindByNameAsync(model.Email);
+            var user = await userManager.FindByIdAsync(userId);
 
             if (user == null)
-            {
-                ModelState.AddModelError("", "User not found!");
-                return View(model);
-            }
-            else
-            {
-                return RedirectToAction("ChangePassword", "Account", new { username = user.UserName });
-            }
-        }
+                return NotFound();
 
-        [HttpGet]
-        public IActionResult ChangePassword(string username)
-        {
-            if (string.IsNullOrEmpty(username))
-            {
-                return RedirectToAction("VerifyEmail", "Account");
-            }
+            var result = await userManager.ConfirmEmailAsync(user, token);
 
-            return View(new ChangePasswordViewModel { Email = username });
-        }
-
-        [HttpPost]
-        public async Task<IActionResult> ChangePassword(ChangePasswordViewModel model)
-        {
-            if (!ModelState.IsValid)
-            {
-                ModelState.AddModelError("", "Something went wrong");
-                return View(model);
-            }
-
-            var user = await userManager.FindByNameAsync(model.Email);
-
-            if(user == null)
-            {
-                ModelState.AddModelError("", "User not found!");
-                return View(model);
-            }
-
-            var result = await userManager.RemovePasswordAsync(user);
             if (result.Succeeded)
-            {
-                result = await userManager.AddPasswordAsync(user, model.NewPassword);
-                return RedirectToAction("Login", "Account");
-            }
-            else
-            {
-                foreach(var error in result.Errors)
-                {
-                    ModelState.AddModelError("", error.Description);
-                }
+                return View("ConfirmEmailSuccess");
 
-                return View(model);
-            }
+            return View("Error");
         }
+
+        // ================= LOGOUT =================
 
         [HttpPost]
         [ValidateAntiForgeryToken]
@@ -173,6 +156,14 @@ namespace UserRoles.Controllers
         {
             await signInManager.SignOutAsync();
             return RedirectToAction("Index", "Home");
+        }
+
+        // ================= VIEWS =================
+
+        [HttpGet]
+        public IActionResult RegistrationSuccess()
+        {
+            return View();
         }
     }
 }
