@@ -13,3 +13,6 @@ This repository contains an ASP.NET Core MVC application built with a robust rol
 * Scalable Architecture:
   Clean and modular code structure for easy customization. <br />
   Implements best practices in ASP.NET Core MVC development. <br />
+
+# Role_Based_Login_Authentication_and_Authorization
+This is a .net based user role based authentication and authorization project with email verification process.
